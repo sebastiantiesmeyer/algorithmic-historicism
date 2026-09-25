@@ -1,0 +1,15 @@
+name: routed-rustication
+state: accepted
+component_type: rustication
+version: 0.1.0
+parameters:
+  - opening_width
+  - opening_height
+  - opening_center
+  - course_spacing
+  - joint_width
+  - joint_depth
+  - bottom_width_fraction
+  - focus_fraction
+  - ray_course_count
+  - facade_depth

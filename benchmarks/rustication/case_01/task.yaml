@@ -1,0 +1,7 @@
+task_id: rustication-case-01
+component_type: rustication
+reference_image: benchmarks/rustication/case_01/reference.png
+description: Reconstruct lower-floor routed rustication around opening.
+hints:
+  course_spacing: 0.35
+max_iterations: 3
