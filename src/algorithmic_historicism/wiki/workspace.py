@@ -89,6 +89,26 @@ class WikiWorkspace:
         if not consolidated.exists():
             consolidated.write_text("", encoding="utf-8")
 
+    def active_skill(self, benchmark: str) -> str | None:
+        path = self.root / "active-skills.json"
+        entries = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+        entry = entries.get(benchmark)
+        if entry is None:
+            return None
+        name = self._validate_id(entry["name"])
+        if not (self.skills_dir / name / "SKILL.md").is_file():
+            raise ValueError(f"Active skill is missing: {name}")
+        return name
+
+    def set_active_skill(self, benchmark: str, name: str, **provenance: object) -> None:
+        self._validate_id(name)
+        if not (self.skills_dir / name / "SKILL.md").is_file():
+            raise ValueError(f"Active skill is missing: {name}")
+        path = self.root / "active-skills.json"
+        entries = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+        entries[benchmark] = {**provenance, "name": name}
+        self._atomic_write(path, json.dumps(entries, indent=2))
+
     @staticmethod
     def _validate_id(value: str) -> str:
         if not _SAFE_ID.fullmatch(value):

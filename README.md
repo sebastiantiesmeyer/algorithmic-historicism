@@ -6,38 +6,63 @@ task-neutral. BIRD Mini-Dev SQLite is the current benchmark adapter.
 
 ## Setup
 
-```powershell
+```bash
 python -m venv .venv
+source .venv/bin/activate
 python -m pip install -e ".[dev]"
-Copy-Item .env.example .env
+test -f .env || cp .env.example .env
 ```
 
-Set `OPENAI_API_KEY` and `AH_AGENT_MODEL` in `.env`. `AH_CONSOLIDATOR_MODEL` is optional.
+These examples use Linux/WSL. Set `OPENAI_API_KEY` in `.env`. The experiment file below
+defines models and learning parameters. For the direct `bird-mini-dev` command,
+set `AH_AGENT_MODEL` in `.env` too; `AH_CONSOLIDATOR_MODEL` is optional.
 
 Download the canonical BIRD Mini-Dev SQLite questions and databases from the
 [BIRD Mini-Dev release](https://github.com/bird-bench/mini_dev). The adapter expects
 `mini_dev_sqlite.json` (or JSONL) and a database root containing files such as
 `dev_databases/<db_id>/<db_id>.sqlite`. Benchmark data is not vendored here.
 
-Generate a protocol lock offline, then use it for the model run:
+## First learning experiment
 
-```powershell
-algorithmic-historicism bird-mini-dev-lock `
-  --data path/to/mini_dev_sqlite.json `
-  --databases path/to/dev_databases `
-  --database-id student_club `
-  --limit-per-split 10 `
+```bash
+cp experiment.example.yaml experiment.yaml
+# Edit experiment.yaml: set your data paths and llm.agent_model.
+algorithmic-historicism experiment lock experiment.yaml
+algorithmic-historicism experiment run experiment.yaml
+```
+
+The lock command checks the dataset and writes `experiment.lock.json` without an API
+key or model calls. The run command requires that lock and makes paid model calls.
+The example uses one database, three cases per split, and one learning iteration.
+
+All paths in YAML (or JSON) are relative to the configuration file, including `env_file`.
+Each run gets a unique directory under `runs`; the `wiki` path stays fixed for continued
+learning. Every run stores `resolved-experiment.json`, `run-config.json`, an incremental
+`attempts.jsonl`, and `run-status.json`; successful runs also write `report.json`.
+Unknown fields and invalid parameters are rejected before model calls. See
+[experiment configuration](docs/experiments.md) for fields and continuation behavior.
+
+## Direct commands
+
+The existing flag-based workflow is also supported:
+
+```bash
+algorithmic-historicism bird-mini-dev-lock \
+  --data path/to/mini_dev_sqlite.json \
+  --databases path/to/dev_databases \
+  --database-id student_club \
+  --limit-per-split 10 \
   --output runs/bird-example/experiment.lock.json
 ```
 
-```powershell
-algorithmic-historicism bird-mini-dev `
-  --data path/to/mini_dev_sqlite.json `
-  --databases path/to/dev_databases `
-  --database-id student_club `
-  --limit-per-split 10 `
-  --lock runs/bird-example/experiment.lock.json `
-  --workspace runs/bird-example `
+```bash
+algorithmic-historicism bird-mini-dev \
+  --data path/to/mini_dev_sqlite.json \
+  --databases path/to/dev_databases \
+  --database-id student_club \
+  --limit-per-split 10 \
+  --lock runs/bird-example/experiment.lock.json \
+  --workspace runs/bird-example \
   --wiki memory/bird-example
 ```
 
@@ -66,6 +91,6 @@ stores training traces in `evidence/`, notes in `strategies/`, `antipatterns/`, 
 promotion decisions. The CLI also provides `memory init|list|search|show|approve|deprecate|pin`
 and `skills list`, each with an explicit `--wiki` path.
 
-```powershell
+```bash
 python -m pytest
 ```

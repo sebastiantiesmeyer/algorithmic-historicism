@@ -8,6 +8,8 @@ import time
 from collections import defaultdict
 from pathlib import Path
 
+import yaml
+
 from ..evaluation.base import EvaluationResult
 from ..llm.base import LLMProvider
 from ..skills.format import SkillDocument, load_skill_document
@@ -161,7 +163,7 @@ class BirdMiniDevAgent:
     def _schema(self, db_id: str) -> str:
         if db_id not in self._schemas:
             path = database_path(self.databases_root, db_id)
-            with sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True) as connection:
+            with sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True) as connection:
                 tables = connection.execute(
                     "SELECT name, sql FROM sqlite_master WHERE type IN ('table', 'view') "
                     "AND name NOT LIKE 'sqlite_%' ORDER BY name"
@@ -199,7 +201,8 @@ class BirdMiniDevAgent:
             expected="",
             prediction=prediction,
             skill_name=skill.name if skill else None,
-            events=[{"operation": "generate-sql", "db_id": db_id}],
+            events=[{"operation": "generate-sql", "db_id": db_id,
+                     "prompt": prompt, "response": response}],
         )
 
 
@@ -208,7 +211,7 @@ def _execute_read_only(db_path: Path, sql: str, timeout_seconds: float) -> list[
     allowed = {sqlite3.SQLITE_READ, sqlite3.SQLITE_SELECT, sqlite3.SQLITE_FUNCTION}
     if hasattr(sqlite3, "SQLITE_RECURSIVE"):
         allowed.add(sqlite3.SQLITE_RECURSIVE)
-    with sqlite3.connect(f"{db_path.as_uri()}?mode=ro", uri=True) as connection:
+    with sqlite3.connect(f"{db_path.resolve().as_uri()}?mode=ro", uri=True) as connection:
         connection.execute("PRAGMA query_only=ON")
         connection.set_authorizer(lambda action, *_: sqlite3.SQLITE_OK if action in allowed else sqlite3.SQLITE_DENY)
         connection.set_progress_handler(lambda: int(time.monotonic() >= deadline), 1000)
@@ -291,9 +294,12 @@ class BirdWikiSkillProposer:
             f"## {note.title}\nWhen: {note.trigger}\n"
             + "\n".join(f"- {step}" for step in note.guidance)
             + "\nCheck: " + "; ".join(note.verification)
+            + "\nApplicability: " + "; ".join(note.applicability)
+            + "\nLimitations: " + "; ".join(note.limitations)
             for note in notes
         )
-        if incumbent and incumbent.instructions == instructions:
+        instructions = instructions.strip()
+        if incumbent and incumbent.instructions.strip() == instructions:
             return None
         return SkillProposal(
             name=f"bird-mini-dev-v{iteration}",
@@ -302,6 +308,34 @@ class BirdWikiSkillProposer:
             rationale=f"Consolidated {len(notes)} evidence-backed wiki notes from training attempts.",
             source_patterns=[note.note_id for note in notes],
         )
+
+
+def _load_incumbent(wiki: WikiWorkspace) -> SkillDocument | None:
+    active = wiki.active_skill("bird-mini-dev-sqlite")
+    if active is not None:
+        return load_skill_document(wiki.skills_dir / active / "SKILL.md")
+    # Migrate older wikis using promotion timestamps, never filename ordering.
+    accepted = list(wiki.skills_dir.glob("bird-mini-dev-*/SKILL.md"))
+    if not accepted:
+        return None
+    if len(accepted) > 1:
+        dated = []
+        for path in accepted:
+            metadata_path = path.parent / "metadata.yaml"
+            metadata = yaml.safe_load(metadata_path.read_text(encoding="utf-8")) if metadata_path.exists() else {}
+            timestamp = (metadata or {}).get("decision_date")
+            if not timestamp:
+                raise ValueError("Legacy wiki has multiple skills without promotion dates; set active-skills.json explicitly")
+            dated.append((str(timestamp), path))
+        dated.sort(key=lambda item: item[0])
+        if dated[-1][0] == dated[-2][0]:
+            raise ValueError("Legacy wiki has ambiguous promotion dates; set active-skills.json explicitly")
+        selected = dated[-1][1]
+    else:
+        selected = accepted[0]
+    incumbent = load_skill_document(selected)
+    wiki.set_active_skill("bird-mini-dev-sqlite", incumbent.name, source="legacy-migration")
+    return incumbent
 
 
 def run_bird_mini_dev(
@@ -324,11 +358,30 @@ def run_bird_mini_dev(
     lock = _protocol_lock(suite, data_path, databases_root, limit_per_split, database_id)
     if protocol_lock is not None and json.loads(protocol_lock.read_text(encoding="utf-8")) != lock:
         raise ValueError("Protocol lock differs from the selected cases or input files")
+    if max_iterations < 1:
+        raise ValueError("max_iterations must be positive")
+    if any((workspace / name).exists() for name in ("run-config.json", "report.json", "attempts.jsonl", "candidates")):
+        raise ValueError("Run workspace already contains a run; choose a fresh workspace")
     workspace.mkdir(parents=True, exist_ok=True)
     (workspace / "protocol-lock.json").write_text(json.dumps(lock, indent=2), encoding="utf-8")
     wiki = WikiWorkspace.open(wiki_root, create=True)
-    accepted = sorted(wiki.skills_dir.glob("bird-mini-dev-*/SKILL.md"))
-    incumbent = load_skill_document(accepted[-1]) if accepted else None
+    incumbent = _load_incumbent(wiki)
+    run_id = re.sub(r"[^a-z0-9]+", "-", workspace.name.lower()).strip("-") or "run"
+    if (wiki.evidence_dir / "raw" / run_id).exists():
+        raise ValueError("Wiki already contains this run ID; choose a workspace with a new name")
+    config = {
+        **(run_metadata or {}),
+        "benchmark": suite.name,
+        "dataset_sha256": lock["dataset_sha256"],
+        "split_seed": SPLIT_SEED,
+        "database_id": database_id,
+        "limit_per_split": limit_per_split,
+        "max_iterations": max_iterations,
+        "initial_skill": incumbent.name if incumbent else None,
+    }
+    (workspace / "run-config.json").write_text(json.dumps(config, indent=2), encoding="utf-8")
+    status_path = workspace / "run-status.json"
+    status_path.write_text(json.dumps({"status": "running"}), encoding="utf-8")
     engine = EvolutionEngine(
         workspace=workspace,
         wiki_root=wiki_root,
@@ -337,25 +390,19 @@ def run_bird_mini_dev(
         maintainer=TraceMemoryMaintainer(workspace.name, PromptedConsolidator(consolidation_provider)),
         proposer=BirdWikiSkillProposer(),
     )
-    report = engine.run(suite, max_iterations=max_iterations, initial_skill=incumbent).model_dump(mode="json")
-    raw_scores = []
-    for case in suite.select("test"):
-        raw_skill = _raw_trace_skill(wiki, workspace.name, case)
-        public_case = case.model_copy(update={"expected": ""})
-        trace = engine.runner.run(public_case, raw_skill)
-        raw_scores.append(engine.evaluator.evaluate(case, trace).score)
+    try:
+        report = engine.run(suite, max_iterations=max_iterations, initial_skill=incumbent).model_dump(mode="json")
+        raw_scores = []
+        for case in suite.select("test"):
+            raw_skill = _raw_trace_skill(wiki, workspace.name, case)
+            trace = engine._rollout([case], raw_skill, iteration=0, persist=False, condition="raw-trace")[0]
+            raw_scores.append(trace.score)
+    except BaseException as exc:
+        status_path.write_text(json.dumps({"status": "failed", "error_type": type(exc).__name__}), encoding="utf-8")
+        raise
     report["raw_trace_test_score"] = sum(raw_scores) / len(raw_scores)
     report["case_counts"] = {split: len(suite.select(split)) for split in ("training", "validation", "test")}
     report["protocol"] = "Custom continual-learning split of BIRD Mini-Dev; not an official leaderboard score"
     (workspace / "report.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
-    config = {
-        "benchmark": suite.name,
-        "dataset_sha256": lock["dataset_sha256"],
-        "split_seed": SPLIT_SEED,
-        "database_id": database_id,
-        "limit_per_split": limit_per_split,
-        "max_iterations": max_iterations,
-        **(run_metadata or {}),
-    }
-    (workspace / "run-config.json").write_text(json.dumps(config, indent=2), encoding="utf-8")
+    status_path.write_text(json.dumps({"status": "completed"}), encoding="utf-8")
     return report

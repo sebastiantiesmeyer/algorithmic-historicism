@@ -1,0 +1,30 @@
+# Copy to experiment.yaml, then edit the paths and model ID.
+# All relative paths are resolved from this file's directory.
+schema_version: 1
+name: student-club-first
+benchmark: bird-mini-dev
+
+data: ./data/mini_dev_sqlite.json
+databases: ./data/dev_databases
+database_id: student_club
+
+# Keep this wiki for continued learning; use a new path for an independent experiment.
+wiki: ./memory/student-club-first
+# Each run creates a unique subdirectory here.
+runs: ./runs/student-club-first
+
+# Credentials and optional AH_LLM_BASE_URL come from this file or the shell environment.
+env_file: ./.env
+# Optional; defaults to <configuration filename without extension>.lock.json.
+# lock: ./experiment.lock.json
+
+limit_per_split: 3  # Per database and split; 0 selects every case.
+max_iterations: 1
+
+llm:
+  agent_model: your-model-id
+  # Omit to use agent_model for consolidation too.
+  # consolidator_model: your-model-id
+  max_output_tokens: 12000
+  # Leave null for models that do not accept temperature.
+  temperature: null

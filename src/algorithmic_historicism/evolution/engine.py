@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import difflib
+import json
 import re
 from pathlib import Path
 from typing import Protocol
@@ -59,6 +60,11 @@ class EvolutionEngine:
         self.min_improvement = min_improvement
         self.frontier_capacity = frontier_capacity
 
+    def _journal(self, payload: dict[str, object]) -> None:
+        # Run diagnostics are separate from the training-only learning memory.
+        with (self.workspace / "attempts.jsonl").open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(payload) + "\n")
+
     def _rollout(
         self,
         cases: list[BenchmarkCase],
@@ -66,20 +72,31 @@ class EvolutionEngine:
         *,
         iteration: int,
         persist: bool,
+        condition: str = "evolution",
     ) -> list[RolloutTrace]:
         traces = []
         for case in cases:
             public_case = case.model_copy(update={"expected": ""})
-            trace = self.runner.run(public_case, skill)
-            evaluation = self.evaluator.evaluate(case, trace)
+            context = {"case_id": case.case_id, "split": case.split,
+                       "iteration": iteration, "condition": condition,
+                       "skill_name": skill.name if skill else None}
+            self._journal({**context, "status": "started"})
+            try:
+                trace = self.runner.run(public_case, skill)
+                self._journal({**context, "status": "generated",
+                               "trace": trace.model_copy(update={"expected": ""}).model_dump(mode="json")})
+                evaluation = self.evaluator.evaluate(case, trace)
+            except Exception as exc:
+                self._journal({**context, "status": "failed", "error_type": type(exc).__name__})
+                raise
             trace = trace.model_copy(update={
                 "expected": "",
                 "score": evaluation.score,
                 "evaluation": evaluation.model_dump(mode="json"),
             })
             traces.append(trace)
-        if persist:
-            for trace in traces:
+            self._journal({**context, "status": "completed", "trace": trace.model_dump(mode="json")})
+            if persist:
                 run_id = re.sub(r"[^a-z0-9]+", "-", self.workspace.name.lower()).strip("-") or "run"
                 self.wiki.add_raw_trace(
                     run_id, iteration, trace.case_id, trace.model_dump(mode="json")
@@ -191,6 +208,10 @@ class EvolutionEngine:
             )
             if accepted:
                 self.candidates.promote(candidate_name, self.skills_root)
+                self.wiki.set_active_skill(
+                    suite.name, candidate_name, workspace=str(self.workspace.resolve()),
+                    iteration=iteration, validation_score=candidate_score,
+                )
                 incumbent = candidate
                 best_score = candidate_score
 
@@ -207,10 +228,10 @@ class EvolutionEngine:
 
         test_cases = suite.select("test")
         baseline_test_score = self._score(
-            self._rollout(test_cases, None, iteration=0, persist=False)
+            self._rollout(test_cases, None, iteration=0, persist=False, condition="no-skill")
         )
         test_score = baseline_test_score if incumbent is None else self._score(
-            self._rollout(test_cases, incumbent, iteration=0, persist=False)
+            self._rollout(test_cases, incumbent, iteration=0, persist=False, condition="learned-skill")
         )
         return EvolutionReport(
             benchmark=suite.name,

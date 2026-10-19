@@ -1,8 +1,9 @@
 from pathlib import Path
+import json
 
 import pytest
 
-from algorithmic_historicism.wiki.consolidator import EvidenceConsolidator
+from algorithmic_historicism.wiki.consolidator import EvidenceConsolidator, PromptedConsolidator
 from algorithmic_historicism.wiki.models import ExperienceRecord, MemoryCandidate
 from algorithmic_historicism.wiki.prompts import build_consolidation_prompt
 from algorithmic_historicism.wiki.workspace import WikiWorkspace
@@ -96,3 +97,25 @@ def test_prompt_requires_evidence_and_allows_no_op(tmp_path: Path):
     assert "Never invent evidence" in prompt
     assert "run-1" in prompt
     assert "Do not paste complete programs" in prompt
+
+
+@pytest.mark.parametrize("invalid", ["duplicate", "unknown-evidence"])
+def test_prompted_batch_rejected_without_changing_notes(tmp_path: Path, invalid: str):
+    wiki = WikiWorkspace.open(tmp_path / "wiki")
+    EvidenceConsolidator().consolidate([experience("run-1")], wiki)
+    original = wiki.find_note("minimal-mutation").model_dump_json()
+    decisions = [{"action": "create", "rationale": "New knowledge", "evidence_ids": ["run-2"],
+                  "note": candidate().model_copy(update={"note_id": "new-note"}).model_dump()}]
+    decisions.append({"action": "create", "rationale": "Invalid create",
+                      "evidence_ids": ["unknown" if invalid == "unknown-evidence" else "run-2"],
+                      "note": candidate().model_dump()})
+
+    class Provider:
+        def complete(self, prompt: str) -> str:
+            return json.dumps({"decisions": decisions})
+
+    with pytest.raises(ValueError):
+        PromptedConsolidator(Provider()).consolidate([experience("run-2")], wiki)
+    assert wiki.find_note("minimal-mutation").model_dump_json() == original
+    assert wiki.find_note("new-note") is None
+    assert "run-2" not in wiki.consolidated_experience_ids()

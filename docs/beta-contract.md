@@ -5,6 +5,11 @@ engine, wiki, and skill APIs are task-neutral; this document describes the one c
 benchmark adapter. This is a custom within-database learning experiment, not an official
 BIRD leaderboard submission.
 
+For a Linux/WSL setup using one YAML/JSON file per experiment, see
+[experiment configuration](experiments.md). The `experiment lock` and `experiment run`
+commands use this same benchmark protocol, create unique run directories, and retain
+the configured wiki between runs.
+
 ## Runtime and inputs
 
 - Python 3.11 or newer and the dependency ranges in `pyproject.toml` are required. No
@@ -26,7 +31,10 @@ BIRD leaderboard submission.
   letters, digits, `_`, and `-`.
 - Use a fresh `--wiki` and `--workspace` for an independent run. A reused wiki may
   supply an accepted skill and accumulated notes; its validation baseline is then not
-  a no-skill baseline.
+  a no-skill baseline. Promotions record the active skill in `<wiki>/active-skills.json`.
+  Older wikis migrate using promotion dates; ambiguous legacy histories require an
+  explicit active-skill selection. An existing run workspace is rejected before model
+  calls; a reused wiki also requires a new workspace name for unique trace IDs.
 
 ## Frozen split
 
@@ -75,7 +83,9 @@ resumable yet.
 | Path | Meaning |
 | --- | --- |
 | `<workspace>/protocol-lock.json` | The exact public input and case manifest used by the run, written before model calls. |
-| `<workspace>/run-config.json` | Dataset hash, split seed, selection parameters, iteration limit, and configured model IDs/settings. Written after a complete run. |
+| `<workspace>/run-config.json` | Dataset hash, split seed, selection parameters, iteration limit, initial skill, and configured model IDs/settings. Written before model calls. |
+| `<workspace>/run-status.json` | `running`, `completed`, or `failed`, with the exception type on a caught failure. Abrupt process termination can leave `running`. |
+| `<workspace>/attempts.jsonl` | Incremental attempt starts, generated outputs, evaluations, and failures for every split and test condition. Includes SQL prompts and responses; kept outside learning memory. |
 | `<workspace>/report.json` | Validation history and mean execution accuracy for no-skill, raw-trace, and learned-skill test conditions. Written after a complete run. |
 | `<workspace>/candidates/` | Proposed skill documents and validation decisions, if a proposal was made. |
 | `<wiki>/evidence/raw/` | Training attempt traces and their evaluation feedback. Validation/test traces are not persisted here. |
@@ -87,6 +97,9 @@ an additional learned-skill model call. A score is the fraction of selected case
 predicted SQL returns the same *set* of rows as gold SQL on the selected database;
 invalid or timed-out predicted SQL receives zero. Successful execution does not mean
 that a skill improved accuracy or that a query is semantically equivalent on other
-data. Model/API errors and invalid gold SQL abort the run; partial artifacts may remain.
-Prompt and token/cost capture, interruption recovery, and official evaluator parity
+data. Model/API errors and invalid gold SQL abort the run; partial artifacts remain
+available for inspection. Each completed training attempt is saved immediately.
+Duplicate wiki note creates and unknown evidence references in a consolidation batch
+are rejected before note writes. SQL prompts and responses are captured, but
+token/cost capture, interruption recovery, and official evaluator parity
 are not part of this contract yet.

@@ -96,6 +96,17 @@ class PromptedConsolidator:
         response = self.provider.complete(build_consolidation_prompt(pending, related))
         payload = self._extract_json(response)
         decisions = ConsolidationResponse.model_validate(payload).decisions
+        # Reject invalid references and duplicate creates before changing any notes.
+        known_ids = {record.experience_id for record in pending}
+        created_ids: set[str] = set()
+        for decision in decisions:
+            if set(decision.evidence_ids) - known_ids:
+                raise ValueError("Consolidation cited unknown experience")
+            if decision.action == "create":
+                note_id = decision.note.note_id
+                if note_id in created_ids or wiki.find_note(note_id) is not None:
+                    raise ValueError(f"Consolidation create would replace existing note: {note_id}")
+                created_ids.add(note_id)
         changed: list[str] = []
         for decision in decisions:
             note_id = self._apply(decision, pending, wiki)
@@ -133,8 +144,8 @@ class PromptedConsolidator:
         candidate = decision.note
         target_id = decision.target_id or (candidate.note_id if candidate else None)
         existing = wiki.find_note(str(target_id)) if target_id else None
-        if decision.action == "create":
-            existing = None
+        if decision.action == "create" and existing is not None:
+            raise ValueError(f"Consolidation create would replace existing note: {target_id}")
         if candidate is None and existing is None:
             return None
         source = candidate or MemoryCandidate(

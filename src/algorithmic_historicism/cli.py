@@ -8,6 +8,7 @@ import typer
 
 from .config import LLMSettings
 from .evolution.bird_mini_dev import make_bird_mini_dev_lock, run_bird_mini_dev
+from .experiments import lock_experiment, run_experiment
 from .llm.providers.openai import openai_provider
 from .skills.registry import SkillRegistry
 from .wiki.workspace import WikiWorkspace
@@ -15,8 +16,31 @@ from .wiki.workspace import WikiWorkspace
 app = typer.Typer(help="Experience, wiki memory, and skill evolution")
 skills_app = typer.Typer(help="Inspect accepted skills")
 memory_app = typer.Typer(help="inspect and curate persistent wiki memory")
+experiment_app = typer.Typer(help="Lock and run a YAML/JSON experiment configuration")
 app.add_typer(skills_app, name="skills")
 app.add_typer(memory_app, name="memory")
+app.add_typer(experiment_app, name="experiment")
+
+
+@experiment_app.command("lock")
+def experiment_lock(config: Path = typer.Argument(..., help="Experiment YAML or JSON file.")):
+    """Freeze selected inputs and cases offline; regenerates the configured lock."""
+    try:
+        target = lock_experiment(config)
+    except (ValueError, OSError, TypeError) as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    typer.echo(str(target))
+
+
+@experiment_app.command("run")
+def experiment_run(config: Path = typer.Argument(..., help="Experiment YAML or JSON file.")):
+    """Run a locked experiment in a new directory using its persistent wiki."""
+    try:
+        target, report = run_experiment(config)
+    except (ValueError, OSError, TypeError) as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    typer.echo(json.dumps(report, indent=2))
+    typer.echo(f"workspace: {target}")
 
 
 @app.command("bird-mini-dev")
